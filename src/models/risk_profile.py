@@ -41,5 +41,31 @@ class RiskProfileResponse(BaseModel):
     detected_patterns: List[RiskPattern]
     last_updated: datetime
     risk_factors: List[str]
-    monitoring_status: str
+    monitoring_status: RiskStatus
     review_required: bool
+
+class RiskPattern(BaseModel):
+    pattern_id: str = Field(..., description="Unique identifier for risk pattern")
+    name: str
+    characteristics: dict
+    red_flags: List[str]
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class RiskStatus(str, Enum):
+    LOW = "low_risk"
+    MEDIUM = "medium_risk"
+    HIGH = "high_risk"
+
+class MerchantRiskProfile(BaseModel):
+    merchant_id: str = Field(..., description="Unique identifier for merchant")
+    overall_risk_score: float = Field(..., ge=0.0, le=100.0)
+    detected_patterns: List[RiskPattern] = []
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    risk_factors: List[str] = []
+    monitoring_status: str
+    review_required: bool = False
+
+class RiskProfileResponse(BaseModel):
+    merchant_risk_profile: MerchantRiskProfile
