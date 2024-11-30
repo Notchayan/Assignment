@@ -313,7 +313,25 @@ class DataGenerator:
         customer_id: str,
         timestamp: datetime
     ) -> float:
-        """Calculate transaction risk score"""
+        """
+        Calculate risk score for a single transaction based on multiple factors.
+
+        Args:
+            amount (float): Transaction amount
+            merchant (Dict): Merchant profile including risk parameters
+            customer_id (str): Unique identifier for the customer
+            timestamp (datetime): Transaction timestamp
+
+        Returns:
+            float: Normalized risk score between 0.0 and 1.0
+
+        Risk Factors:
+            - Base merchant risk
+            - Amount deviation from average
+            - Time of transaction
+            - Customer history
+            - Transaction velocity
+        """
         base_risk = merchant.get("risk_score", 0.5)
         
         # Amount factor

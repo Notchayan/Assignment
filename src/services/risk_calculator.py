@@ -3,6 +3,10 @@ from typing import List, Dict, Optional, Callable
 from collections import defaultdict, Counter
 import logging
 import math
+import json
+from functools import lru_cache
+import redis
+import uuid
 
 from src.models.risk_profile import (
     RiskPattern, RiskPatternType, RiskProfileResponse, PatternCharacteristics,
@@ -176,11 +180,137 @@ class AdvancedRiskCalculator:
 
 
 class RiskCalculatorService:
+    """
+    RiskCalculatorService: Core service for merchant risk analysis and pattern detection.
+
+    This service implements sophisticated risk analysis algorithms to evaluate merchant behavior
+    and detect potential fraud patterns. It processes transaction data through multiple pattern
+    detection algorithms and generates comprehensive risk profiles.
+
+    Key Features:
+        - Multi-pattern risk detection
+        - Configurable risk thresholds
+        - Timeline event generation
+        - Risk score calculation and categorization
+
+    Usage:
+        calculator = RiskCalculatorService()
+        risk_profile = await calculator.analyze_merchant_risk(merchant_id="merchant_123")
+
+    Author: [Your Name]
+    Last Modified: [Date]
+    """
     def __init__(self, db_client):
         self.db = db_client
         self.pattern_configs = self._load_pattern_configs()
-        self.risk_profile_repo = RiskProfileRepository(db_client)
-        self.logger = logging.getLogger("RiskCalculatorService")
+        self.redis_client = redis.Redis(
+            host='localhost', 
+            port=6379, 
+            db=0,
+            decode_responses=True
+        )
+        self.cache_ttl = {
+            'merchant_profile': 3600,  # 1 hour
+            'risk_metrics': 1800,      # 30 minutes
+            'pattern_results': 900     # 15 minutes
+        }
+        self.pattern_weights = {
+            'late_night': 0.2,
+            'velocity_spike': 0.25,
+            'split_transactions': 0.2,
+            'round_amount': 0.15,
+            'customer_concentration': 0.2
+        }
+
+    async def get_cached_pattern_results(self, merchant_id: str, pattern_type: str) -> Optional[Dict]:
+        """Get cached pattern detection results."""
+        cache_key = f"pattern:{merchant_id}:{pattern_type}"
+        cached_result = self.redis_client.get(cache_key)
+        return json.loads(cached_result) if cached_result else None
+
+    async def cache_pattern_results(self, merchant_id: str, pattern_type: str, results: Dict):
+        """Cache pattern detection results."""
+        cache_key = f"pattern:{merchant_id}:{pattern_type}"
+        self.redis_client.setex(
+            cache_key,
+            self.cache_ttl['pattern_results'],
+            json.dumps(results)
+        )
+
+    async def _detect_pattern_with_cache(
+        self, 
+        transactions: List[Dict], 
+        pattern_type: RiskPatternType, 
+        config: Dict
+    ) -> Optional[RiskPattern]:
+        merchant_id = transactions[0]['merchant_id']
+        cached_result = await self.get_cached_pattern_results(merchant_id, pattern_type.value)
+        
+        if cached_result:
+            return RiskPattern(**cached_result)
+
+        pattern = await self._detect_pattern(transactions, pattern_type, config)
+        if pattern:
+            await self.cache_pattern_results(merchant_id, pattern_type.value, pattern.dict())
+        
+        return pattern
+
+    @lru_cache(maxsize=1000)
+    async def get_cached_merchant_profile(self, merchant_id: str):
+        """Cache merchant profiles in memory."""
+        cache_key = f"merchant_profile:{merchant_id}"
+        
+        # Try to get from Redis first
+        cached_profile = self.redis_client.get(cache_key)
+        if cached_profile:
+            return json.loads(cached_profile)
+            
+        # If not in cache, get from database
+        profile = await self.db.merchants.find_one({"merchant_id": merchant_id})
+        if profile:
+            # Store in Redis
+            self.redis_client.setex(
+                cache_key,
+                self.cache_ttl['merchant_profile'],
+                json.dumps(profile)
+            )
+        return profile
+
+    async def process_rule_based_patterns(self, transactions: List[Dict]) -> List[Dict]:
+        """Process transactions through rule-based patterns."""
+        events = []
+        
+        # Late night transaction pattern
+        night_txns = [t for t in transactions if 23 <= t['timestamp'].hour or t['timestamp'].hour <= 4]
+        if len(night_txns) / len(transactions) > 0.5:
+            events.append({
+                "type": "HIGH_RISK_PATTERN",
+                "pattern": "LATE_NIGHT",
+                "severity": "HIGH",
+                "description": "Over 50% transactions during late night hours"
+            })
+
+        # Customer concentration pattern
+        customer_counts = Counter(t['customer_id'] for t in transactions)
+        max_customer_percentage = max(customer_counts.values()) / len(transactions)
+        if max_customer_percentage > 0.8:
+            events.append({
+                "type": "HIGH_RISK_PATTERN",
+                "pattern": "CUSTOMER_CONCENTRATION",
+                "severity": "HIGH",
+                "description": "Over 80% transactions from single customer"
+            })
+
+        return events
+
+    async def cache_risk_metrics(self, merchant_id: str, risk_metrics: Dict):
+        """Cache risk metrics in Redis."""
+        cache_key = f"risk_metrics:{merchant_id}"
+        self.redis_client.setex(
+            cache_key,
+            self.cache_ttl['risk_metrics'],
+            json.dumps(risk_metrics)
+        )
 
     def _load_pattern_configs(self) -> Dict:
         """Dynamically load risk pattern configurations."""
@@ -239,23 +369,31 @@ class RiskCalculatorService:
             # Analyze patterns
             for pattern_type, config in self.pattern_configs.items():
                 logger.info(f"Detecting pattern: {pattern_type}")
-                pattern = await self._detect_pattern(transactions, pattern_type, config)
+                pattern = await self._detect_pattern_with_cache(transactions, pattern_type, config)
                 if pattern:
                     detected_patterns.append(pattern)
                     risk_factors.append(pattern.name)
 
-            # Calculate overall score using advanced calculator
-            overall_score = await advanced_calculator.calculate_comprehensive_risk(detected_patterns)
-            logger.info(f"Overall risk score for merchant {merchant_id}: {overall_score*100}")
+            # Calculate comprehensive risk
+            risk_score = await self.calculate_comprehensive_risk(detected_patterns)
+            logger.info(f"Overall risk score for merchant {merchant_id}: {risk_score*100}")
+
+            # Generate timeline events
+            timeline_generator = TimelineGenerator()
+            timeline_events = await timeline_generator.generate_events(
+                merchant_id,
+                {"risk_score": risk_score * 100, "risk_factors": risk_factors},
+                daily_summaries
+            )
 
             return RiskProfileResponse(
                 merchant_id=merchant_id,
-                overall_risk_score=overall_score * 100,  # Scaling to 0-100
+                overall_risk_score=risk_score * 100,  # Scaling to 0-100
                 detected_patterns=detected_patterns,
                 last_updated=datetime.utcnow(),
                 risk_factors=risk_factors,
-                monitoring_status=self._determine_risk_status(overall_score * 100),
-                review_required=overall_score * 100 > 70,
+                monitoring_status=self.categorize_risk(risk_score),
+                review_required=risk_score * 100 > 70,
             )
         except Exception as e:
             logger.error(f"Error analyzing risk for merchant {merchant_id}: {e}", exc_info=True)
@@ -281,13 +419,13 @@ class RiskCalculatorService:
             review_required=False,
         )
 
-    def _determine_risk_status(self, score: float) -> RiskStatus:
-        """Determine the risk monitoring status based on the overall score."""
-        if score > 70:
-            return RiskStatus.HIGH
-        elif score > 40:
-            return RiskStatus.MEDIUM
-        return RiskStatus.LOW
+    def categorize_risk(self, risk_score: float) -> str:
+        """Categorize merchant based on risk score."""
+        if risk_score > 0.7:
+            return "HIGH_RISK"
+        elif risk_score > 0.4:
+            return "MEDIUM_RISK"
+        return "LOW_RISK"
 
     async def _detect_pattern(
         self, transactions: List[Dict], pattern_type: RiskPatternType, config: Dict
@@ -355,20 +493,51 @@ class RiskCalculatorService:
         return None
 
     async def _detect_split_transactions(self, transactions: List[Dict], config: Dict) -> Optional[RiskPattern]:
-        """Detect split transactions patterns."""
-        logger.info("Detecting Split Transactions pattern.")
-        threshold_amount = config.get("threshold_amount", 1000)
-        max_split = config.get("max_split", 5)
-        split_count = sum(1 for txn in transactions if txn['amount'] > threshold_amount)
-        if split_count >= max_split:
+        """Enhanced split transaction detection with temporal clustering."""
+        time_window = config.get('time_window_minutes', 30)
+        amount_threshold = config.get('amount_threshold', 10000)
+        min_transactions = config.get('min_transactions', 3)
+        
+        # Sort transactions by timestamp
+        sorted_txns = sorted(transactions, key=lambda x: x['timestamp'])
+        clusters = []
+        current_cluster = []
+        
+        for txn in sorted_txns:
+            if not current_cluster:
+                current_cluster.append(txn)
+            else:
+                time_diff = (txn['timestamp'] - current_cluster[-1]['timestamp']).total_seconds() / 60
+                if time_diff <= time_window:
+                    current_cluster.append(txn)
+                else:
+                    if len(current_cluster) >= min_transactions:
+                        clusters.append(current_cluster)
+                    current_cluster = [txn]
+        
+        if len(current_cluster) >= min_transactions:
+            clusters.append(current_cluster)
+        
+        suspicious_clusters = []
+        for cluster in clusters:
+            total_amount = sum(t['amount'] for t in cluster)
+            if total_amount >= amount_threshold:
+                suspicious_clusters.append(cluster)
+        
+        if suspicious_clusters:
             return RiskPattern(
-                pattern_id="pattern_split_transactions",
+                pattern_id=f"pattern_split_transactions_{uuid.uuid4().hex[:8]}",
                 name=RiskPatternType.SPLIT_TRANSACTIONS.value,
-                confidence_score=split_count / max_split,
-                characteristics=config,
-                red_flags=[f"{split_count} split transactions detected."],
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                confidence_score=len(suspicious_clusters) / len(clusters),
+                characteristics={
+                    "cluster_count": len(suspicious_clusters),
+                    "average_cluster_size": sum(len(c) for c in suspicious_clusters) / len(suspicious_clusters),
+                    "total_amount": sum(sum(t['amount'] for t in c) for c in suspicious_clusters)
+                },
+                red_flags=[
+                    f"Found {len(suspicious_clusters)} suspicious transaction clusters",
+                    f"Average cluster size: {sum(len(c) for c in suspicious_clusters) / len(suspicious_clusters):.1f} transactions"
+                ]
             )
         return None
 
@@ -413,3 +582,44 @@ class RiskCalculatorService:
                 updated_at=datetime.utcnow(),
             )
         return None
+
+    async def calculate_comprehensive_risk(self, merchant_id: str, summaries: Dict) -> float:
+        risk_score = 0.0
+        
+        # Late night risk
+        late_night_risk = await self._calculate_late_night_risk(merchant_id)
+        risk_score += late_night_risk * self.pattern_weights["late_night"]
+        
+        # Velocity spike risk
+        velocity_risk = await self._calculate_velocity_risk(merchant_id)
+        risk_score += velocity_risk * self.pattern_weights["velocity_spike"]
+        
+        # Customer concentration risk
+        concentration_risk = await self._calculate_concentration_risk(merchant_id)
+        risk_score += concentration_risk * self.pattern_weights["customer_concentration"]
+        
+        # Inconsistent trends risk
+        trend_risk = self._calculate_trend_risk(summaries)
+        risk_score += trend_risk * self.pattern_weights["inconsistent_trends"]
+        
+        return min(risk_score, 1.0)  # Normalize to 0-1 range
+
+    def _calculate_trend_risk(self, summaries: Dict) -> float:
+        """Calculate trend risk based on transaction summaries."""
+        # Implement trend risk calculation logic here
+        return 0.0
+
+    async def _calculate_late_night_risk(self, merchant_id: str) -> float:
+        """Calculate late-night risk based on transaction summaries."""
+        # Implement late-night risk calculation logic here
+        return 0.0
+
+    async def _calculate_velocity_risk(self, merchant_id: str) -> float:
+        """Calculate velocity spike risk based on transaction summaries."""
+        # Implement velocity spike risk calculation logic here
+        return 0.0
+
+    async def _calculate_concentration_risk(self, merchant_id: str) -> float:
+        """Calculate customer concentration risk based on transaction summaries."""
+        # Implement customer concentration risk calculation logic here
+        return 0.0

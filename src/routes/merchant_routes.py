@@ -6,6 +6,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import asyncio
 import os
 import logging
+from src.utils.exceptions import MerchantNotFoundError, GeneralAPIError
+from src.models.risk_profile import RiskProfileResponse
+from src.repositories.risk_profile_repo import RiskProfileRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,14 +25,24 @@ def get_risk_calculator():
 class MerchantIDPathParams(BaseModel):
     merchant_id: str = Field(..., regex="^merchant_[0-9a-fA-F]{24}$")  # Example regex
 
-@router.get("/merchants/{merchant_id}/risk-profile")
+@router.get("/merchants/{merchant_id}/risk-profile", response_model=RiskProfileResponse)
 async def get_merchant_risk_profile(merchant: MerchantIDPathParams = Depends()):
+    """
+    Retrieve the risk profile of a specific merchant.
+
+    - **merchant_id**: Unique identifier for the merchant.
+
+    **Possible Errors:**
+    - 404: Merchant not found.
+    - 500: Internal server error.
+    """
     try:
-        risk_profile = await risk_calculator.analyze_merchant_risk(merchant.merchant_id)
+        risk_profile = await RiskProfileRepository().get_risk_profile(merchant.merchant_id)
         return risk_profile
+    except MerchantNotFoundError as e:
+        raise e
     except Exception as e:
-        logger.error(f"Error analyzing risk for merchant {merchant.merchant_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise GeneralAPIError(detail=str(e))
 
 @router.get("/merchants/{merchant_id}")
 async def get_merchant(merchant_id: str):

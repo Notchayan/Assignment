@@ -69,6 +69,180 @@ This command will start the server with hot-reloading enabled, allowing you to s
 
 ## API Documentation
 
+### Detailed API Documentation
+
+#### Risk Analysis Endpoints
+
+##### Get Merchant Risk Profile
+```http
+GET /api/merchants/{merchant_id}/risk-profile
+```
+Retrieves comprehensive risk analysis for a merchant.
+
+**Parameters:**
+- `merchant_id` (path) - Unique identifier of the merchant
+- `days` (query, optional) - Analysis window in days (default: 30)
+
+**Response:**
+```json
+{
+  "merchant_id": "string",
+  "overall_risk_score": 75.5,
+  "detected_patterns": [
+    {
+      "pattern_id": "string",
+      "name": "LATE_NIGHT",
+      "confidence_score": 0.85,
+      "characteristics": {},
+      "red_flags": ["string"]
+    }
+  ],
+  "monitoring_status": "HIGH_RISK",
+  "review_required": true
+}
+```
+
+##### Submit Transaction
+```http
+POST /api/transactions
+```
+Submit a new transaction for risk assessment.
+
+**Request Body:**
+```json
+{
+  "merchant_id": "string",
+  "amount": 1000.00,
+  "timestamp": "2024-03-21T15:30:00Z",
+  "customer_id": "string",
+  "payment_method": "CARD",
+  "location": {
+    "latitude": 0,
+    "longitude": 0
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "transaction_id": "string",
+  "risk_assessment": {
+    "risk_score": 25.5,
+    "detected_patterns": [],
+    "recommendation": "APPROVE"
+  }
+}
+```
+
+#### Pattern Detection Endpoints
+
+##### Get Pattern Analysis
+```http
+GET /api/merchants/{merchant_id}/patterns
+```
+Retrieve specific pattern detection results.
+
+**Parameters:**
+- `merchant_id` (path) - Merchant identifier
+- `pattern_type` (query, optional) - Specific pattern to analyze
+- `start_date` (query, optional) - Analysis start date
+- `end_date` (query, optional) - Analysis end date
+
+**Response:**
+```json
+{
+  "patterns": [
+    {
+      "type": "VELOCITY_SPIKE",
+      "confidence_score": 0.75,
+      "details": {
+        "detected_spikes": 3,
+        "average_intensity": 2.5
+      }
+    }
+  ]
+}
+```
+
+#### Timeline Events
+
+##### Get Merchant Timeline
+```http
+GET /api/merchants/{merchant_id}/timeline
+```
+Retrieve chronological events and risk signals.
+
+**Parameters:**
+- `merchant_id` (path) - Merchant identifier
+- `days` (query, optional) - Number of days to analyze
+- `event_types` (query, optional) - Filter specific event types
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "timestamp": "2024-03-21T15:30:00Z",
+      "event_type": "RISK_ALERT",
+      "severity": "HIGH",
+      "description": "Unusual transaction pattern detected"
+    }
+  ]
+}
+```
+
+### Rate Limits
+- Standard tier: 100 requests per minute
+- Enterprise tier: 1000 requests per minute
+- Burst capacity: 2x normal limit for 30 seconds
+
+### Error Responses
+All endpoints may return the following error responses:
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human readable error message",
+    "details": {}
+  }
+}
+```
+
+Common error codes:
+- `400` - Bad Request
+- `401` - Unauthorized
+- `403` - Forbidden
+- `404` - Resource Not Found
+- `429` - Too Many Requests
+- `500` - Internal Server Error
+
+### Authentication
+All API requests require authentication using Bearer tokens:
+```http
+Authorization: Bearer <your_api_token>
+```
+
+Tokens can be obtained through the authentication endpoint:
+```http
+POST /api/auth/token
+```
+
+### Webhooks
+Configure webhooks to receive real-time notifications:
+```http
+POST /api/webhooks/configure
+```
+
+**Request Body:**
+```json
+{
+  "url": "https://your-domain.com/webhook",
+  "events": ["RISK_ALERT", "PATTERN_DETECTED"],
+  "secret": "your_webhook_secret"
+}
+```
+
 The API comes with built-in documentation accessible via:
 
 - **Swagger UI**: `http://localhost:8000/docs` - An interactive interface for exploring the API endpoints.
